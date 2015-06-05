@@ -6,11 +6,15 @@ package filesrv
 
 import (
 	"bytes"
+	"container/list"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
+	"sync"
 	"time"
+
+	"github.com/simonz05/util/log"
 )
 
 type fileInfo struct {
@@ -33,13 +37,24 @@ func (f fileInfo) Mode() os.FileMode {
 
 type file struct {
 	io.ReadSeeker
-	fi fileInfo
+	fi  fileInfo
+	buf []byte
 }
 
-func (f *file) Close() error               { return nil }
-func (f *file) Stat() (os.FileInfo, error) { return f.fi, nil }
-func (f *file) Readdir(count int) ([]os.FileInfo, error) {
-	return nil, io.EOF
+func (f *file) Close() error                             { return nil }
+func (f *file) Stat() (os.FileInfo, error)               { return f.fi, nil }
+func (f *file) Readdir(count int) ([]os.FileInfo, error) { return nil, io.EOF }
+
+// returns a read clone of the file
+func (f *file) readClone() http.File {
+	if f.buf == nil {
+		// todo
+		panic("copy a readClone")
+	}
+	return &file{
+		ReadSeeker: bytes.NewReader(f.buf),
+		fi:         f.fi,
+	}
 }
 
 type remoteFileSystem struct {
@@ -54,18 +69,30 @@ func (fs *remoteFileSystem) Open(name string) (http.File, error) {
 		return nil, err
 	}
 
-	buf, _ := ioutil.ReadAll(res.Body)
+	log.Println(path, res)
+
+	if res.StatusCode != http.StatusOK || res.ContentLength <= 0 {
+		return nil, http.ErrMissingFile
+	}
+
+	buf, err := ioutil.ReadAll(res.Body)
+
+	if err != nil {
+		return nil, err
+	}
+
 	rd := bytes.NewReader(buf)
 
 	f := &file{
 		ReadSeeker: rd,
-
+		buf:        buf,
 		fi: fileInfo{
 			size:     rd.Len(),
 			modtime:  time.Now().UTC(),
 			basename: path,
 		},
 	}
+
 	return f, nil
 }
 
@@ -76,19 +103,78 @@ func New(origin string) http.FileSystem {
 }
 
 type memoryCacheFilesystem struct {
-	fs    http.FileSystem
-	cache map[string]http.File
+	fs        http.FileSystem
+	size      int
+	evictList *list.List
+	cache     map[string]*list.Element
+	mux       sync.RWMutex
 }
 
-func NewCache(fs http.FileSystem) http.FileSystem {
+func NewCache(fs http.FileSystem, size int, bytes int) http.FileSystem {
 	return &memoryCacheFilesystem{
-		fs:    fs,
-		cache: make(map[string]http.File),
+		size:      size,
+		fs:        fs,
+		cache:     make(map[string]*list.Element),
+		evictList: list.New(),
 	}
 }
 
+func (fs *memoryCacheFilesystem) get(name string) (http.File, bool) {
+	fs.mux.Lock()
+	defer fs.mux.Unlock()
+	ent, ok := fs.cache[name]
+
+	if !ok {
+		return nil, false
+	}
+
+	fs.evictList.MoveToFront(ent)
+	f := ent.Value.(*file)
+	return f.readClone(), true
+}
+
+func (fs *memoryCacheFilesystem) add(name string, f http.File) http.File {
+	fs.mux.Lock()
+	defer fs.mux.Unlock()
+
+	// Check for existing item
+	if v, ok := fs.cache[name]; ok {
+		fs.evictList.MoveToFront(v)
+		v.Value = f
+		return f.(*file).readClone()
+	}
+
+	// Add new item
+	fs.cache[name] = fs.evictList.PushFront(f)
+
+	evict := fs.evictList.Len() > fs.size
+
+	// Verify size not exceeded
+	if evict {
+		fs.removeOldest()
+	}
+
+	return f.(*file).readClone()
+}
+
+// removeOldest removes the oldest item from the cache.
+func (fs *memoryCacheFilesystem) removeOldest() {
+	ent := fs.evictList.Back()
+
+	if ent != nil {
+		fs.removeElement(ent)
+	}
+}
+
+// removeElement is used to remove a given list element from the cache
+func (fs *memoryCacheFilesystem) removeElement(e *list.Element) {
+	fs.evictList.Remove(e)
+	f := e.Value.(*file)
+	delete(fs.cache, f.fi.Name())
+}
+
 func (fs *memoryCacheFilesystem) Open(name string) (http.File, error) {
-	if f, ok := fs.cache[name]; ok {
+	if f, ok := fs.get(name); ok {
 		return f, nil
 	}
 
@@ -98,6 +184,5 @@ func (fs *memoryCacheFilesystem) Open(name string) (http.File, error) {
 		return nil, err
 	}
 
-	fs.cache[name] = f
-	return f, nil
+	return fs.add(name, f), nil
 }
