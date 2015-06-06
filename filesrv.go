@@ -104,15 +104,19 @@ func New(origin string) http.FileSystem {
 
 type memoryCacheFilesystem struct {
 	fs        http.FileSystem
-	size      int
 	evictList *list.List
 	cache     map[string]*list.Element
 	mux       sync.RWMutex
+	maxSize   int64
+	size      int64
+	maxItems  int
+	items     int
 }
 
-func NewCache(fs http.FileSystem, size int, bytes int) http.FileSystem {
+func NewCache(fs http.FileSystem, maxItems int, maxSize int) http.FileSystem {
 	return &memoryCacheFilesystem{
-		size:      size,
+		maxItems:  maxItems,
+		maxSize:   int64(maxSize),
 		fs:        fs,
 		cache:     make(map[string]*list.Element),
 		evictList: list.New(),
@@ -146,8 +150,7 @@ func (fs *memoryCacheFilesystem) add(name string, f http.File) http.File {
 
 	// Add new item
 	fs.cache[name] = fs.evictList.PushFront(f)
-
-	evict := fs.evictList.Len() > fs.size
+	evict := fs.evictList.Len() > fs.maxItems
 
 	// Verify size not exceeded
 	if evict {
