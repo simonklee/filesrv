@@ -17,6 +17,7 @@ import (
 	"github.com/simonz05/util/log"
 	"github.com/simonz05/util/sig"
 )
+import _ "expvar"
 
 func Init(conf *config.Config) (io.Closer, error) {
 	c, err := newContextFromConfig(conf)

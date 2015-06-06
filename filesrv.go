@@ -137,27 +137,28 @@ func (fs *memoryCacheFilesystem) get(name string) (http.File, bool) {
 	return f.readClone(), true
 }
 
-func (fs *memoryCacheFilesystem) add(name string, f http.File) http.File {
+func (fs *memoryCacheFilesystem) add(name string, f *file) http.File {
 	fs.mux.Lock()
 	defer fs.mux.Unlock()
 
-	// Check for existing item
+	// update if exists
 	if v, ok := fs.cache[name]; ok {
 		fs.evictList.MoveToFront(v)
+		fs.size -= v.Value.(*file).fi.Size()
 		v.Value = f
-		return f.(*file).readClone()
+		fs.size += f.fi.Size()
+		return f.readClone()
 	}
 
-	// Add new item
+	// add new
 	fs.cache[name] = fs.evictList.PushFront(f)
-	evict := fs.evictList.Len() > fs.maxItems
+	fs.size += f.fi.Size()
 
-	// Verify size not exceeded
-	if evict {
+	if fs.evictList.Len() > fs.maxItems {
 		fs.removeOldest()
 	}
 
-	return f.(*file).readClone()
+	return f.readClone()
 }
 
 // removeOldest removes the oldest item from the cache.
@@ -170,13 +171,17 @@ func (fs *memoryCacheFilesystem) removeOldest() {
 }
 
 // removeElement is used to remove a given list element from the cache
-func (fs *memoryCacheFilesystem) removeElement(e *list.Element) {
-	fs.evictList.Remove(e)
-	f := e.Value.(*file)
+func (fs *memoryCacheFilesystem) removeElement(ent *list.Element) {
+	fs.evictList.Remove(ent)
+	f := ent.Value.(*file)
+	fs.size -= f.fi.Size()
 	delete(fs.cache, f.fi.Name())
 }
 
 func (fs *memoryCacheFilesystem) Open(name string) (http.File, error) {
+	defer func() {
+		log.Printf("total memsize %.2f MB", float64(fs.size)/1.0e6)
+	}()
 	if f, ok := fs.get(name); ok {
 		return f, nil
 	}
@@ -187,5 +192,6 @@ func (fs *memoryCacheFilesystem) Open(name string) (http.File, error) {
 		return nil, err
 	}
 
-	return fs.add(name, f), nil
+	rv := fs.add(name, f.(*file))
+	return rv, nil
 }
