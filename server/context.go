@@ -17,7 +17,7 @@ type context struct {
 
 func newContextFromConfig(conf *config.Config) (*context, error) {
 	c := &context{}
-	c.filesystem = filesrv.NewCache(filesrv.New(conf.Origin), 20, 1024*1024*512)
+	c.filesystem = filesrv.NewCache(filesrv.New(conf.Origin), 50, 1024*1024*512)
 	return c, nil
 }
 
