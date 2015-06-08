@@ -7,11 +7,15 @@ package filesrv
 import (
 	"bytes"
 	"container/list"
+	"crypto/md5"
+	"encoding/hex"
 	"io"
 	"io/ioutil"
+	"mime"
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +28,7 @@ type fileInfo struct {
 	modtime     time.Time
 	size        int
 	contentType string
+	etag        string
 }
 
 func (f fileInfo) Name() string       { return f.basename }
@@ -64,6 +69,52 @@ type remoteFileSystem struct {
 	origin string
 }
 
+func getContentType(r *http.Response, rd io.ReadSeeker, name string) (string, error) {
+	const sniffLen = 512
+	ctypes, haveType := r.Header["Content-Type"]
+	var ctype string
+	if !haveType {
+		ctype = mime.TypeByExtension(filepath.Ext(name))
+		if ctype == "" {
+			// read a chunk to decide between utf-8 text and binary
+			var buf [sniffLen]byte
+			n, _ := io.ReadFull(rd, buf[:])
+			ctype = http.DetectContentType(buf[:n])
+			_, err := rd.Seek(0, os.SEEK_SET) // rewind to output whole file
+
+			if err != nil {
+				return "", err
+			}
+		}
+	} else if len(ctypes) > 0 {
+		ctype = ctypes[0]
+	}
+
+	return ctype, nil
+}
+
+func getModtime(r *http.Response) (modtime time.Time) {
+	if t, err := time.Parse(http.TimeFormat, r.Header.Get("Last-Modified")); err != nil {
+		modtime = time.Now().UTC()
+	} else {
+		modtime = t
+	}
+	return
+}
+
+func getETag(r *http.Response, rd io.ReadSeeker) (etag string) {
+	etag = r.Header.Get("Etag")
+	etag = strings.Trim(etag, "\"")
+
+	if etag == "" {
+		hash := md5.New()
+		io.Copy(hash, rd)
+		etag = hex.EncodeToString(hash.Sum(nil))
+	}
+
+	return
+}
+
 func (fs *remoteFileSystem) Open(name string) (http.File, error) {
 	log.Printf("origin: %s\n", name)
 	path := fs.origin + name
@@ -87,13 +138,15 @@ func (fs *remoteFileSystem) Open(name string) (http.File, error) {
 	}
 
 	rd := bytes.NewReader(buf)
-	var modtime time.Time
 
-	if t, err := time.Parse(http.TimeFormat, res.Header.Get("Last-Modified")); err != nil {
-		modtime = time.Now().UTC()
-	} else {
-		modtime = t
+	contentType, err := getContentType(res, rd, name)
+
+	if err != nil {
+		return nil, err
 	}
+
+	etag := getETag(res, rd)
+	modtime := getModtime(res)
 
 	f := &file{
 		ReadSeeker: rd,
@@ -102,7 +155,8 @@ func (fs *remoteFileSystem) Open(name string) (http.File, error) {
 			size:        rd.Len(),
 			modtime:     modtime,
 			basename:    path,
-			contentType: res.Header.Get("Content-Type"),
+			contentType: contentType,
+			etag:        etag,
 		},
 	}
 
@@ -227,13 +281,19 @@ func serveFile(w http.ResponseWriter, r *http.Request, fs http.FileSystem, name 
 		return
 	}
 
-	_, haveType := w.Header()["Content-Type"]
-
-	if !haveType {
+	if _, haveType := w.Header()["Content-Type"]; !haveType {
 		ff, ok := f.(*file)
 
 		if ok && ff.fi.contentType != "" {
 			w.Header().Set("Content-Type", ff.fi.contentType)
+		}
+	}
+
+	if _, haveETag := w.Header()["ETag"]; !haveETag {
+		ff, ok := f.(*file)
+
+		if ok && ff.fi.etag != "" {
+			w.Header().Set("ETag", ff.fi.etag)
 		}
 	}
 
