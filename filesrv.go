@@ -11,6 +11,8 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,9 +20,10 @@ import (
 )
 
 type fileInfo struct {
-	basename string
-	modtime  time.Time
-	size     int
+	basename    string
+	modtime     time.Time
+	size        int
+	contentType string
 }
 
 func (f fileInfo) Name() string       { return f.basename }
@@ -62,6 +65,7 @@ type remoteFileSystem struct {
 }
 
 func (fs *remoteFileSystem) Open(name string) (http.File, error) {
+	log.Printf("origin: %s\n", name)
 	path := fs.origin + name
 	res, err := http.DefaultClient.Get(path)
 
@@ -69,7 +73,8 @@ func (fs *remoteFileSystem) Open(name string) (http.File, error) {
 		return nil, err
 	}
 
-	log.Println(path, res)
+	defer res.Body.Close()
+	log.Println(path, res.ContentLength, res)
 
 	if res.StatusCode != http.StatusOK || res.ContentLength <= 0 {
 		return nil, http.ErrMissingFile
@@ -82,14 +87,22 @@ func (fs *remoteFileSystem) Open(name string) (http.File, error) {
 	}
 
 	rd := bytes.NewReader(buf)
+	var modtime time.Time
+
+	if t, err := time.Parse(http.TimeFormat, res.Header.Get("Last-Modified")); err != nil {
+		modtime = time.Now().UTC()
+	} else {
+		modtime = t
+	}
 
 	f := &file{
 		ReadSeeker: rd,
 		buf:        buf,
 		fi: fileInfo{
-			size:     rd.Len(),
-			modtime:  time.Now().UTC(),
-			basename: path,
+			size:        rd.Len(),
+			modtime:     modtime,
+			basename:    path,
+			contentType: res.Header.Get("Content-Type"),
 		},
 	}
 
@@ -180,8 +193,10 @@ func (fs *memoryCacheFilesystem) removeElement(ent *list.Element) {
 
 func (fs *memoryCacheFilesystem) Open(name string) (http.File, error) {
 	defer func() {
-		log.Printf("total memsize %.2f MB", float64(fs.size)/1.0e6)
+		//log.Printf("total memsize %.2f MB", float64(fs.size)/1.0e6)
 	}()
+	log.Printf("cache: %s\n", name)
+
 	if f, ok := fs.get(name); ok {
 		return f, nil
 	}
@@ -194,4 +209,64 @@ func (fs *memoryCacheFilesystem) Open(name string) (http.File, error) {
 
 	rv := fs.add(name, f.(*file))
 	return rv, nil
+}
+
+func serveFile(w http.ResponseWriter, r *http.Request, fs http.FileSystem, name string) {
+	f, err := fs.Open(name)
+
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	defer f.Close()
+	d, err := f.Stat()
+
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	_, haveType := w.Header()["Content-Type"]
+
+	if !haveType {
+		ff, ok := f.(*file)
+
+		if ok && ff.fi.contentType != "" {
+			w.Header().Set("Content-Type", ff.fi.contentType)
+		}
+	}
+
+	// serveContent will check modification time
+	http.ServeContent(w, r, d.Name(), d.ModTime(), f)
+}
+
+type fileHandler struct {
+	root http.FileSystem
+}
+
+// FileServer returns a handler that serves HTTP requests
+// with the contents of the file system rooted at root.
+//
+// To use the operating system's file system implementation,
+// use http.Dir:
+//
+//     http.Handle("/", http.FileServer(http.Dir("/tmp")))
+func FileServer(root http.FileSystem) http.Handler {
+	return &fileHandler{root}
+}
+
+func (f *fileHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	upath := r.URL.Path
+
+	if !strings.HasPrefix(upath, "/") {
+		upath = "/" + upath
+		r.URL.Path = upath
+	}
+
+	if q := r.URL.RawQuery; q != "" {
+		upath += "?" + q
+	}
+
+	serveFile(w, r, f.root, path.Clean(upath))
 }

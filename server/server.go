@@ -11,12 +11,14 @@ import (
 	"net"
 	"net/http"
 
+	"github.com/simonz05/filesrv"
 	"github.com/simonz05/filesrv/config"
 	"github.com/simonz05/util/handler"
 	"github.com/simonz05/util/ioutil"
 	"github.com/simonz05/util/log"
 	"github.com/simonz05/util/sig"
 )
+
 import _ "expvar"
 
 func Init(conf *config.Config) (io.Closer, error) {
@@ -41,7 +43,7 @@ func installHandlers(c *context) error {
 		middleware = append(middleware, handler.RecoveryHandler)
 	}
 
-	http.Handle("/", handler.Use(http.FileServer(c.filesystem), middleware...))
+	http.Handle("/", handler.Use(filesrv.FileServer(c.filesystem), middleware...))
 	return nil
 }
 
