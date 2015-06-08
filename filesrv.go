@@ -307,7 +307,7 @@ func newCacheInvalidator(delfn func(name string)) *cacheInvalidator {
 		added:   make(map[string]bool),
 		removed: make(map[string]bool),
 		lastmod: 0,
-		Period:  time.Second * 5,
+		Period:  time.Second * 30,
 		delfn:   delfn,
 	}
 
