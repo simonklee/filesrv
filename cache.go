@@ -109,9 +109,6 @@ func (fs *memoryCacheFilesystem) removeElement(ent *list.Element) {
 }
 
 func (fs *memoryCacheFilesystem) Open(name string) (http.File, error) {
-	defer func() {
-		//log.Printf("total memsize %.2f MB", float64(fs.size)/1.0e6)
-	}()
 	log.Printf("cache: %s\n", name)
 
 	if f, ok := fs.get(name); ok {
@@ -201,8 +198,8 @@ func (ci *cacheInvalidator) run() {
 					delete(ci.added, k)
 				}
 			}
-			ci.mux.Unlock()
 
+			ci.mux.Unlock()
 			invalidCnt := 0
 
 			// items is now up to date with ci.items
