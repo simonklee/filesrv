@@ -24,8 +24,10 @@ func getContentType(r *http.Response, rd io.ReadSeeker, name string) (string, er
 	const sniffLen = 512
 	ctypes, haveType := r.Header["Content-Type"]
 	var ctype string
+
 	if !haveType {
 		ctype = mime.TypeByExtension(filepath.Ext(name))
+
 		if ctype == "" {
 			// read a chunk to decide between utf-8 text and binary
 			var buf [sniffLen]byte
@@ -89,7 +91,6 @@ func (fs *remoteFileSystem) Open(name string) (http.File, error) {
 	}
 
 	rd := bytes.NewReader(buf)
-
 	contentType, err := getContentType(res, rd, name)
 
 	if err != nil {
